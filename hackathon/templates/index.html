@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Storm Readiness Map</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <aside id="panel">
+    <h1>Storm Readiness Map</h1>
+    <button id="selectBtn">1. Pick area (click 2 corners)</button>
+    <button id="lockBtn" disabled>2. Lock area</button>
+
+    <h2>3. Build your storm</h2>
+    <div class="presets">
+      <button class="secondary" data-preset="thunderstorm">Thunderstorm</button>
+      <button class="secondary" data-preset="flash">Flash flood</button>
+      <button class="secondary" data-preset="nor">Nor'easter</button>
+      <button class="secondary" data-preset="ice">Ice storm</button>
+      <button class="secondary" data-preset="hurricane">Hurricane</button>
+      <button class="secondary" data-preset="clear">Reset</button>
+    </div>
+    <button id="liveBtn" class="secondary" disabled>Load live wind forecast</button>
+
+    {% for key, h in hazards.items() %}
+    <label>{{ h.label }}: <b id="val-{{ key }}">0</b> {{ h.unit }}
+      <input type="range" class="hz" data-key="{{ key }}" min="0" max="{{ h.max }}" step="{{ h.step }}" value="0">
+    </label>
+    {% endfor %}
+
+    <button id="runBtn" disabled>4. Run the storm</button>
+    <p id="status"></p>
+    <p id="summary"></p>
+    <ol id="results"></ol>
+    <p class="note">Values marked "est." are estimates, not measured data. Vulnerability numbers are demo assumptions.</p>
+  </aside>
+  <div id="map"></div>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="{{ url_for('static', filename='map.js') }}"></script>
+</body>
+</html>
