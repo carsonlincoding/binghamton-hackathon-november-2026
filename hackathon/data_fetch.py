@@ -43,19 +43,20 @@ def get_infrastructure(s, w, n, e):
     return cached(key, 3600, lambda: _fetch_infrastructure(s, w, n, e))
 
 def _fetch_infrastructure(s, w, n, e):
-    query = f"""
-    [out:json][timeout:50];
-    (
-      nwr["amenity"~"hospital|fire_station|police"]({s},{w},{n},{e});
-      nwr["man_made"="water_works"]({s},{w},{n},{e});
-      nwr["power"="substation"]({s},{w},{n},{e});
-      nwr["bridge"="yes"]["highway"]({s},{w},{n},{e});
-    );
-    out center tags 400;"""
+    big = max(n - s, e - w) > 0.3  # very large area: keep only major bridges so the answer stays manageable
+    box = f"({s},{w},{n},{e})"
+    bridges = '["highway"~"motorway|trunk|primary"]' if big else '["highway"]'
+    # One limit PER TYPE, so thousands of small bridges can never push out the hospitals and substations.
+    query = f"""[out:json][timeout:{90 if big else 50}];
+    nwr["amenity"="hospital"]{box}->.a; .a out center tags 400;
+    nwr["amenity"~"fire_station|police"]{box}->.b; .b out center tags 400;
+    nwr["man_made"="water_works"]{box}->.c; .c out center tags 200;
+    nwr["power"="substation"]{box}->.d; .d out center tags 600;
+    nwr["bridge"="yes"]{bridges}{box}->.e; .e out center tags 500;"""
     last_error = None
     for url in OVERPASS_URLS:
         try:
-            r = session.post(url, data={"data": query}, timeout=(5, 60))
+            r = session.post(url, data={"data": query}, timeout=(5, 100))
             r.raise_for_status()
             break
         except requests.RequestException as err:

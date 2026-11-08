@@ -1,8 +1,5 @@
-# app.py - the BACKEND entry point. Run this file to start the server.
-# Flow: browser (map.js) -> /api/analyze -> data_fetch.py -> risk_model.py -> JSON back.
 import os, sys, threading, webbrowser, time, math
 
-# Let Python find our other files in THIS folder, wherever the program is launched from.
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 os.chdir(HERE)
@@ -16,28 +13,28 @@ app = Flask(__name__,
             template_folder=os.path.join(HERE, "templates"),
             static_folder=os.path.join(HERE, "static"))
 
-PREPARED = {}  # finished areas, kept in memory
-JOBS = {}      # areas being downloaded right now, so two requests for one area share a single download
+PREPARED = {}
+JOBS = {}    
 LOCK = threading.Lock()
-FETCH = ThreadPoolExecutor(max_workers=4)  # network downloads
-BUILD = ThreadPoolExecutor(max_workers=2)  # one build job per area
+FETCH = ThreadPoolExecutor(max_workers=4)
+BUILD = ThreadPoolExecutor(max_workers=2) 
 
 def snap(box):
     """Round the box OUTWARD to a 0.01 grid. Nearby selections then share the same cached data."""
     s, w, n, e = box
-    lo = lambda v: math.floor(round(v * 100, 6)) / 100  # round() avoids tiny floating-point errors
+    lo = lambda v: math.floor(round(v * 100, 6)) / 100 
     hi = lambda v: math.ceil(round(v * 100, 6)) / 100
     return lo(s), lo(w), hi(n), hi(e)
 
 def _build(sb, small):
-    infra_job = FETCH.submit(get_infrastructure, *sb)  # both downloads run at the same time
+    infra_job = FETCH.submit(get_infrastructure, *sb) 
     struct_job = FETCH.submit(get_structures, *sb) if small else None
     infra = infra_job.result()
     structs = struct_job.result() if struct_job else []
     assets, area = enrich_assets(infra, structs)
     if not small:
         area["note"] = "Large area: building details are estimated. Zoom in for government building data."
-    return assets, area, bool(structs) or not small  # last value False = government lookup failed, do not remember it
+    return assets, area, bool(structs) or not small
 
 def prepare(box):
     """Return (assets inside the box, area info, was_cached)."""
@@ -52,7 +49,7 @@ def prepare(box):
     hit = done is not None
     if done is None:
         try:
-            assets, area, ok = job.result()  # if someone already started this download, we simply wait for it
+            assets, area, ok = job.result() 
         finally:
             with LOCK:
                 JOBS.pop(key, None)
@@ -69,18 +66,16 @@ def prepare(box):
 def bbox_from(body):
     """Pull the locked area out of the request and reject areas that are too big."""
     s, w, n, e = body["south"], body["west"], body["north"], body["east"]
-    if (n - s) > 0.3 or (e - w) > 0.3:
+    if (n - s) > 1.0 or (e - w) > 1.0:
         return None
     return s, w, n, e
 
 @app.route("/")
-def home():
-    # Passing HAZARDS lets index.html build one slider per storm factor automatically.
+def home(): 
     return render_template("index.html", hazards=HAZARDS)
 
 @app.route("/api/live-wind", methods=["POST"])
 def live_wind():
-    # The "Load live forecast" button: returns real peak wind + alerts for the locked area.
     box = bbox_from(request.get_json())
     if not box:
         return jsonify({"error": "Area too large. Zoom in a bit and try again."}), 400
@@ -89,7 +84,6 @@ def live_wind():
 
 @app.route("/api/warm", methods=["POST"])
 def warm():
-    # Called the moment an area is locked, so the data is already downloaded when the user presses Run.
     box = bbox_from(request.get_json())
     if not box:
         return jsonify({"error": "Area too large. Zoom in a bit and try again."}), 400
@@ -106,7 +100,6 @@ def analyze():
     if not box:
         return jsonify({"error": "Area too large. Zoom in a bit and try again."}), 400
 
-    # Keep every slider value between 0 and its allowed max (never trust the browser).
     sent = body.get("scenario", {})
     scenario = {k: max(0.0, min(float(sent.get(k, 0)), h["max"])) for k, h in HAZARDS.items()}
 
@@ -119,5 +112,5 @@ def analyze():
                     "ms": round((time.time() - t0) * 1000), "cached": hit})
 
 if __name__ == "__main__":
-    threading.Timer(1.0, lambda: webbrowser.open("http://127.0.0.1:5000")).start()  # auto-open browser
+    threading.Timer(1.0, lambda: webbrowser.open("http://127.0.0.1:5000")).start()
     app.run(host="127.0.0.1", port=5000, debug=True, use_reloader=False)
