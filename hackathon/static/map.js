@@ -3,7 +3,7 @@ const map = L.map("map", { preferCanvas: true }).setView([42.0987, -75.918], 13)
 L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",
   { attribution: "&copy; OpenStreetMap contributors" }).addTo(map);
 
-let picking = false, corners = [], box = null, locked = null, markers = [], assets = [], timer = null, runId = 0, cur = null;
+let picking = false, corners = [], box = null, preview = null, lockId = 0, locked = null, markers = [], assets = [], timer = null, runId = 0, cur = null;
 const memo = new Map();  // remembers answers for storms already run, so switching back is instant
 const mk = new Map();    // remembers map dots, so a re-score updates them instead of rebuilding them
 const hidden = new Set();  // asset types the user switched off with the filter checkboxes
@@ -14,6 +14,7 @@ const NAMES = { substation: "Substation", hospital: "Hospital", fire_station: "F
                 police: "Police station", water_works: "Water works", bridge: "Bridge" };
 
 // Legend in the corner of the map.
+const hl = L.layerGroup().addTo(map);  // the black outline drawn around whatever you selected
 const legend = L.control({ position: "bottomright" });
 legend.onAdd = () => {
   const d = L.DomUtil.create("div", "legend");
@@ -33,24 +34,63 @@ $("searchBtn").onclick = async () => {
     if (j.length) map.setView([+j[0].lat, +j[0].lon], 14); else $("status").textContent = "Place not found.";
   } catch (e) { $("status").textContent = "Search is unavailable right now."; }
 };
-$("selectBtn").onclick = () => { picking = true; corners = []; $("status").textContent = "Click the first corner."; };
+function sizeText(b) {  // "About 6 x 8 km" plus whether detailed building data will be used
+  const h = b.getNorth() - b.getSouth(), w = b.getEast() - b.getWest();
+  const km = `${Math.round(w * 111 * Math.cos((b.getCenter().lat * Math.PI) / 180))} x ${Math.round(h * 111)} km`;
+  return { tooBig: h > 0.3 || w > 0.3, text: `About ${km}. ` + (h > 0.1 || w > 0.1 ? "Large area, so building details are estimated." : "Small enough for detailed building data.") };
+}
+function setBox(bounds) {  // draws the box (dashed until it is locked)
+  if (box) box.remove();
+  box = L.rectangle(bounds, { color: "#2F6DB5", weight: 2, dashArray: "6 6", fillOpacity: 0.05 }).addTo(map);
+  const info = sizeText(box.getBounds());
+  $("lockBtn").disabled = info.tooBig;
+  $("status").textContent = info.tooBig ? "Too large. Zoom in and draw a smaller box." : info.text + " Press Lock when ready.";
+  return !info.tooBig;
+}
+function unlockArea(msg) {  // lock OFF: Run is disabled until an area is locked again
+  lockId++; locked = null;
+  $("runBtn").disabled = true; $("liveBtn").disabled = true;
+  const lb = $("lockBtn"); lb.textContent = "Lock"; lb.setAttribute("aria-pressed", "false"); lb.title = "";
+  if (box) box.setStyle({ weight: 2, dashArray: "6 6" });
+  $("detail").hidden = true; hl.clearLayers();
+  if (msg) $("status").textContent = msg;
+}
+function lockArea() {  // lock ON: freeze the box and start downloading its data
+  const b = box.getBounds(), my = ++lockId;
+  locked = { south: b.getSouth(), west: b.getWest(), north: b.getNorth(), east: b.getEast() };
+  $("runBtn").disabled = false; $("liveBtn").disabled = false;
+  const lb = $("lockBtn"); lb.textContent = "Locked \u2713"; lb.setAttribute("aria-pressed", "true"); lb.title = "Click to unlock";
+  box.setStyle({ weight: 3, dashArray: null });
+  warm(my);
+}
+function stopPicking() {
+  picking = false;
+  if (preview) { preview.remove(); preview = null; }
+  map.getContainer().classList.remove("picking");
+}
+$("lockBtn").onclick = () => {
+  if (locked) unlockArea("Unlocked. Draw a new box, search, or use the map view.");
+  else if (box) lockArea();
+};
+$("selectBtn").onclick = () => {  // starting a new box automatically unlocks the old one
+  unlockArea(); stopPicking();
+  if (box) { box.remove(); box = null; }
+  $("lockBtn").disabled = true;
+  picking = true; corners = [];
+  map.getContainer().classList.add("picking");
+  $("status").textContent = "Click the first corner. Press Esc to cancel.";
+};
 map.on("click", (e) => {
   if (!picking) return;
   corners.push(e.latlng);
-  if (corners.length === 2) {
-    picking = false;
-    if (box) box.remove();
-    box = L.rectangle(corners, { color: "#2F6DB5", fillOpacity: 0.05 }).addTo(map);
-    $("lockBtn").disabled = false;
-    $("status").textContent = "Happy with it? Lock the area.";
-  } else { $("status").textContent = "Click the opposite corner."; }
+  if (corners.length === 2) { stopPicking(); setBox(corners); }
+  else { $("status").textContent = "Click the opposite corner."; }
 });
-$("lockBtn").onclick = () => {
-  const b = box.getBounds();
-  locked = { south: b.getSouth(), west: b.getWest(), north: b.getNorth(), east: b.getEast() };
-  $("runBtn").disabled = false; $("liveBtn").disabled = false;
-  $("status").textContent = "Area locked. Build a storm, then run it.";
-};
+map.on("mousemove", (e) => {  // live preview of the box while you choose the second corner
+  if (!picking || corners.length !== 1) return;
+  if (preview) preview.setBounds([corners[0], e.latlng]);
+  else preview = L.rectangle([corners[0], e.latlng], { color: "#2F6DB5", weight: 1, dashArray: "4 4", fillOpacity: 0.03, interactive: false }).addTo(map);
+});
 
 function showTab(name) {  // Setup and Results are separate tabs so nothing is hidden below the fold
   const r = name === "results";
@@ -61,9 +101,8 @@ function showTab(name) {  // Setup and Results are separate tabs so nothing is h
 $("tabSetup").onclick = () => showTab("setup");
 $("tabResults").onclick = () => showTab("results");
 $("viewBtn").onclick = () => {  // one click: use whatever the map is showing
-  if (box) box.remove();
-  box = L.rectangle(map.getBounds().pad(-0.1), { color: "#2F6DB5", fillOpacity: 0.05 }).addTo(map);
-  $("lockBtn").disabled = false; $("lockBtn").click();
+  unlockArea(); stopPicking();
+  if (setBox(map.getBounds().pad(-0.1))) lockArea();
 };
 
 // ---------- Storm sliders, presets, live wind ----------
@@ -151,8 +190,9 @@ $("liveBtn").onclick = async () => {
 
 // ---------- Run + show results ----------
 async function runStorm(quiet) {  // quiet = automatic re-score while you move a slider
+  if (!locked) return;
   const my = ++runId;
-  if (!quiet) { $("status").textContent = "Loading infrastructure..."; $("runBtn").disabled = true; $("runBtn").textContent = "Running..."; }
+  if (!quiet) { $("status").textContent = "Loading infrastructure..."; $("runBtn").disabled = true; $("runBtn").textContent = "Running..."; $("runBtn").classList.add("busy"); }
   try {
     const sc = readScenario();
     const key = JSON.stringify([locked, sc]);
@@ -166,7 +206,7 @@ async function runStorm(quiet) {  // quiet = automatic re-score while you move a
     if (my !== runId) return;  // a newer run has started, ignore this old answer
     if (data.error) { $("status").textContent = data.error; return; }
     assets = data.assets;
-    $("detail").hidden = true;
+    $("detail").hidden = true; hl.clearLayers();
     history.replaceState(null, "", "#" + encodeURIComponent(JSON.stringify(sc)));  // makes the storm shareable via the page link
     if (!quiet) { mk.forEach((m) => m.remove()); mk.clear(); buildFilters(); }
     draw();
@@ -177,7 +217,7 @@ async function runStorm(quiet) {  // quiet = automatic re-score while you move a
       (ar && ar.note) || "Government building data was unavailable, so estimates are used.";
     $("status").textContent += ` Done in ${(data.ms / 1000).toFixed(1)} s${data.cached ? " (cached area)" : ""}.`;
   } catch (e) { $("status").textContent = "Could not reach the server. Is app.py still running?"; }
-  finally { if (!quiet) { $("runBtn").disabled = false; $("runBtn").textContent = "Run the storm"; } }
+  finally { if (!quiet) { $("runBtn").disabled = !locked; $("runBtn").textContent = "Run the storm"; $("runBtn").classList.remove("busy"); } }
 }
 $("runBtn").onclick = () => runStorm(false);
 function autoRerun() {  // after the first run, changing the storm re-scores by itself
@@ -210,12 +250,12 @@ function draw() {
     else { m = L.circleMarker([a.lat, a.lon], { radius: rad, color: COLORS[lvl], fillOpacity: 0.8 }).addTo(map).bindTooltip(`${a.name} (${a.risk}%)`); mk.set(id, m); }
     m.on("click", () => showDetail(a)); a.marker = m;
     const li = document.createElement("li");
-    li.className = lvl; li.tabIndex = 0;  // tabIndex lets keyboard users reach it
+    li.className = lvl; li.tabIndex = 0; a.li = li;  // tabIndex lets keyboard users reach it
     const nm = document.createElement("span"), ty = document.createElement("small"), pill = document.createElement("b");
     nm.className = "nm"; nm.textContent = a.name; ty.textContent = NAMES[a.type];
     pill.className = "pill " + lvl; pill.textContent = a.risk + "%";
     li.append(nm, ty, pill);
-    const go = () => { map.flyTo([a.lat, a.lon], 17); showDetail(a); };
+    const go = () => { map.flyTo([a.lat, a.lon], 17, { animate: !matchMedia("(prefers-reduced-motion: reduce)").matches }); showDetail(a); };
     li.onclick = go; li.onkeydown = (e) => { if (e.key === "Enter") go(); };
     frag.appendChild(li);
   });
@@ -238,8 +278,9 @@ function plain(a) {  // one friendly sentence about this asset
 
 function showDetail(a) {
   const d = $("detail"); d.innerHTML = ""; d.className = "lvl-" + levelOf(a.risk);
+  highlight(a);
   const x = document.createElement("button");
-  x.className = "close"; x.textContent = "\u00d7"; x.setAttribute("aria-label", "Close details"); x.onclick = () => { d.hidden = true; };
+  x.className = "close"; x.textContent = "\u00d7"; x.setAttribute("aria-label", "Close details"); x.onclick = () => { d.hidden = true; hl.clearLayers(); };
   d.appendChild(x);
   const add = (tag, text, cls) => { const e = document.createElement(tag); e.textContent = text; if (cls) e.className = cls; d.appendChild(e); return e; };
   add("h3", a.name);
@@ -250,12 +291,15 @@ function showDetail(a) {
   Object.entries(a.breakdown).filter(([, v]) => v > 0).sort((p, q) => q[1] - p[1]).forEach(([k, v]) => {
     add("div", `${k}: ${v}%`, "bar").style.setProperty("--w", v + "%");
   });
+  renderFixes(a, d);
   add("h4", "Facts");
   const MAT = { W: "wood frame", M: "masonry", S: "steel", H: "manufactured" };
   if (MAT[a.material]) add("p", `Built of ${MAT[a.material]}` + (a.levels ? `, ${a.levels} floors.` : "."));
   if (a.ground_elv != null) add("p", `Ground is ${Math.round(a.ground_elv)} ft above sea level` + (a.found_ht ? `, raised ${a.found_ht} ft` : "") + (a.firmzone ? `. FEMA flood zone ${a.firmzone}.` : "."));
   if (a.people_nearby) add("p", `About ${a.people_nearby} people live within 400 m.`);
   add("p", `Source: ${a.data_source || "OpenStreetMap"}. Confidence: ${a.confidence}` + (a.estimated.length ? ` (${a.estimated.join(", ")} guessed).` : "."), "note");
+  document.querySelectorAll("#results li.sel").forEach((x) => x.classList.remove("sel"));
+  if (a.li) { a.li.classList.add("sel"); a.li.scrollIntoView({ block: "nearest" }); }
   d.hidden = false;
 }
 
@@ -276,3 +320,131 @@ function stormBar() {  // shows the storm being run, with [edited] if the slider
   const tag = $("stormTag"); tag.hidden = !active.length; tag.textContent = name + (edited ? " [edited]" : "");
 }
 stormBar();
+
+async function warm(my) {  // asks the server to download this area's data in the background
+  const start = runId;
+  try {
+    $("status").textContent = "Getting area data...";
+    const r = await fetch("/api/warm", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(locked) });
+    const j = await r.json();
+    if (runId === start && lockId === my) $("status").textContent = j.error || `Area ready: ${j.count} assets found. Pick a storm and run it.`;
+  } catch (e) { if (runId === start && lockId === my) $("status").textContent = "Area locked. Pick a storm and run it."; }
+}
+
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") { $("detail").hidden = true; hl.clearLayers(); if (picking) { stopPicking(); $("status").textContent = "Drawing cancelled."; } } });
+
+$("csvBtn").onclick = () => {  // download the ranked list as a spreadsheet file
+  const q = (v) => {
+    let t = String(v ?? "");
+    if (/^[=+\-@]/.test(t)) t = "'" + t;  // stops spreadsheet programs from running names as formulas
+    return '"' + t.replace(/"/g, '""') + '"';
+  };
+  const rows = [["Rank", "Name", "Type", "Risk %", "Low %", "High %", "Hours to recover (est.)", "Main threat", "People within 400 m", "Data source"]];
+  assets.forEach((a, i) => {
+    const top = Object.entries(a.breakdown).sort((x, y) => y[1] - x[1])[0];
+    rows.push([i + 1, a.name, NAMES[a.type], a.risk, a.risk_low, a.risk_high, a.recovery_hrs, top && top[1] ? top[0] : "", a.people_nearby, a.data_source]);
+  });
+  const blob = new Blob([rows.map((r) => r.map(q).join(",")).join("\r\n")], { type: "text/csv" });
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob); link.download = "storm-results.csv"; link.click();
+  URL.revokeObjectURL(link.href);
+};
+
+function highlight(a) {  // white halo + black ring on the point, plus a dashed 400 m circle (the area used for "people nearby")
+  hl.clearLayers();
+  const r = (a.marker ? a.marker.getRadius() : 8) + 8;
+  L.circle([a.lat, a.lon], { radius: 400, color: "#000", weight: 2, dashArray: "6 6", fill: false, interactive: false }).addTo(hl);
+  L.circleMarker([a.lat, a.lon], { radius: r, color: "#fff", weight: 8, fill: false, interactive: false }).addTo(hl);
+  L.circleMarker([a.lat, a.lon], { radius: r, color: "#000", weight: 4, fill: false, interactive: false }).addTo(hl);
+}
+
+// ---------- Possible solutions, tailored to the selected spot ----------
+// threat label -> { asset type (or "default") : [what to do, cost, multiplier on that threat's failure chance] }
+// The multipliers are ASSUMED effects for the demo, not engineering estimates.
+const FIX_TABLE = {
+  "Flood / storm surge": { bridge: ["Raise or reinforce the approaches and clear the drainage", "$$$", 0.5],
+    default: ["Install flood barriers and lift key equipment above flood level", "$$", 0.35] },
+  "Wind speed": { bridge: ["Inspect and reinforce railings, signs, and joints", "$$", 0.7],
+    substation: ["Reinforce poles and structures, and trim nearby trees", "$$", 0.6],
+    default: ["Add roof ties and shutters, and secure rooftop equipment", "$$", 0.6] },
+  "Rainfall (24 h)": { default: ["Clear storm drains and improve drainage before the storm", "$", 0.6] },
+  "Ice buildup": { substation: ["Add de-icing, sturdier lines, and spare parts on site", "$$", 0.5],
+    bridge: ["Pre-treat the deck and keep salt crews on standby", "$", 0.6],
+    default: ["Keep roofs and access routes clear, and stock salt", "$", 0.7] },
+  "Snowfall": { default: ["Set plowing priority and check roof load limits", "$", 0.7] },
+  "Lightning": { substation: ["Install or test surge arresters and grounding", "$$", 0.4],
+    default: ["Add surge protection for key equipment", "$", 0.5] },
+  "Heat above normal": { substation: ["Add cooling and reduce load with demand response", "$$", 0.6],
+    default: ["Service cooling systems and plan backup cooling", "$", 0.7] },
+  "Earthquake shaking": { bridge: ["Retrofit bearings and add restrainers", "$$$", 0.5],
+    default: ["Brace equipment and review the building for seismic upgrades", "$$", 0.6] },
+};
+
+function riskWith(a, mult, casc) {  // recompute the failure chance if some threats shrink (mult) and power loss matters less (casc)
+  const own = Object.values(a.breakdown).reduce((s, v) => s * (1 - v / 100), 1);
+  const x = own > 0 ? Math.max(0, 1 - (1 - a.risk / 100) / own) : 0;  // share of risk that came from losing power elsewhere
+  const surv = Object.entries(a.breakdown).reduce((s, [k, v]) => s * (1 - (v / 100) * (mult[k] ?? 1)), 1);
+  return 100 * (1 - surv * (1 - x * casc));
+}
+
+function fixContext(a, label) {  // one sentence of real facts about this exact spot
+  if (label === "Flood / storm surge" && a.ground_elv != null && a.base_elev != null)
+    return ` It sits about ${Math.max(0, Math.round(a.ground_elv - a.base_elev))} ft above the nearest low ground` + (a.firmzone ? ` (FEMA zone ${a.firmzone}).` : ".");
+  if (label === "Wind speed" && (a.material === "W" || a.material === "H")) return " Wood or manufactured construction is more wind-prone.";
+  return "";
+}
+
+function fixes(a) {
+  const items = [];
+  const base = riskWith(a, {}, 1);
+  Object.entries(a.breakdown).filter(([, v]) => v >= 12).forEach(([label, v]) => {
+    const row = FIX_TABLE[label];
+    if (!row) return;
+    const [title, cost, m] = row[a.type] || row.default;
+    items.push({ title, cost, why: `${label} alone gives a ${v}% failure chance here.` + fixContext(a, label), mult: { [label]: m }, casc: 1 });
+  });
+  if (a.depends_on && a.cascade >= 5) {
+    items.push({ title: a.type === "hospital" ? "Test the backup generator and stock 72+ hours of fuel" : "Add a backup generator or a second power feed",
+      cost: "$$", why: `Losing power at "${a.depends_on}" adds ${a.cascade} points of risk.`, mult: {}, casc: 0.25 });
+  }
+  items.forEach((f) => { f.after = Math.round(Math.max(0, a.risk - Math.max(0, base - riskWith(a, f.mult, f.casc)))); });
+  items.sort((p, q) => p.after - q.after);
+  const top = items.slice(0, 4);
+  const allMult = {}; let allCasc = 1;
+  top.forEach((f) => { Object.entries(f.mult).forEach(([k, m]) => { allMult[k] = (allMult[k] ?? 1) * m; }); allCasc = Math.min(allCasc, f.casc); });
+  const allAfter = top.length > 1 ? Math.round(Math.max(0, a.risk - Math.max(0, base - riskWith(a, allMult, allCasc)))) : null;
+  const extra = [];
+  if (a.risk >= 30 && a.recovery_hrs >= 24) {
+    const fmt = (h) => (h >= 48 ? Math.round(h / 24) + " days" : Math.round(h) + " hours");
+    extra.push({ title: "Pre-arrange repair crews and spare parts", cost: "$", why: `Fixing it could take ${fmt(a.recovery_hrs)}.`, note: `Recovery: ${fmt(a.recovery_hrs)} to about ${fmt(a.recovery_hrs * 0.6)}` });
+  }
+  if (a.risk >= 30 && a.people_nearby >= 500) {
+    extra.push({ title: "Plan shelter or evacuation for nearby residents", cost: "$", why: `About ${a.people_nearby} people live within 400 m.`, note: "Does not change the failure chance, but protects people." });
+  }
+  return { items: top, extra, allAfter };
+}
+
+function renderFixes(a, d) {
+  const h = document.createElement("h4"); h.textContent = "Possible solutions for this spot"; d.appendChild(h);
+  const { items, extra, allAfter } = fixes(a);
+  const all = items.concat(extra);
+  if (!all.length) {
+    const p = document.createElement("p"); p.textContent = "Low risk in this storm. Try a stronger one to see what would help."; d.appendChild(p); return;
+  }
+  all.forEach((f) => {
+    const box = document.createElement("div"); box.className = "fix";
+    const t = document.createElement("b"); t.textContent = f.title;
+    const c = document.createElement("small"); c.className = "cost"; c.textContent = f.cost;
+    const w = document.createElement("p"); w.textContent = f.why;
+    const r = document.createElement("div"); r.className = "delta";
+    r.textContent = f.note || `Risk ${a.risk}% to about ${f.after}%`;
+    box.append(t, c, w, r); d.appendChild(box);
+  });
+  if (allAfter !== null) {
+    const p = document.createElement("p"); p.className = "lead";
+    p.textContent = `Doing all the risk fixes: ${a.risk}% to about ${allAfter}%.`; d.appendChild(p);
+  }
+  const n = document.createElement("p"); n.className = "note"; n.textContent = "$ low, $$ medium, $$$ high cost. Effects are assumed demo values, not engineering estimates."; d.appendChild(n);
+}
+
+$("searchBox").addEventListener("keydown", (e) => { if (e.key === "Enter") $("searchBtn").click(); });

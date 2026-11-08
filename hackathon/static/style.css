@@ -53,7 +53,7 @@ button:focus-visible, input:focus-visible, #results li:focus-visible { outline:3
 #results small { color:var(--muted); }
 .pill { padding:2px 8px; border-radius:999px; font-size:.8rem; color:#fff; background:var(--low); }
 .pill.high { background:var(--high); } .pill.mid { background:var(--mid); }
-#detail { position:absolute; z-index:1000; top:12px; right:12px; width:min(340px, calc(100% - 24px)); max-height:calc(100% - 24px); overflow-y:auto;
+#detail { position:absolute; z-index:1000; top:12px; right:12px; width:min(390px, calc(100% - 24px)); max-height:calc(100% - 24px); overflow-y:auto;
   background:var(--card); color:var(--ink); border:1px solid var(--line); border-top:5px solid var(--low); border-radius:var(--radius); padding:14px; box-shadow:0 6px 24px rgba(0,0,0,.25); }
 #detail.lvl-high { border-top-color:var(--high); } #detail.lvl-mid { border-top-color:var(--mid); }
 #detail h3 { margin:0 28px 6px 0; font-size:1.05rem; } #detail h4 { margin:12px 0 4px; font-size:.85rem; color:var(--muted); }
@@ -92,3 +92,19 @@ details { margin-top:10px; } summary { cursor:pointer; font-size:.88rem; color:v
 #stormTag { position:absolute; z-index:900; top:12px; left:50%; transform:translateX(-50%); max-width:50%; padding:5px 12px; border-radius:999px;
   background:var(--card); color:var(--ink); border:1px solid var(--line); font-size:.82rem; box-shadow:0 2px 10px rgba(0,0,0,.2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 #stormTag[hidden] { display:none; }
+
+#results li.sel { background:var(--tint); }
+.primary:active:not(:disabled), .chip:active, .ghost:active:not(:disabled) { transform:translateY(1px); }
+@media (prefers-reduced-motion: reduce) { * { transition:none !important; animation:none !important; } }
+
+#results li.sel { outline:2px solid var(--ink); outline-offset:-2px; }
+.fix { border:1px solid var(--line); border-radius:8px; padding:8px 10px; margin:6px 0; background:var(--bg); }
+.fix p { margin:3px 0; font-size:.83rem; color:var(--muted); }
+.cost { margin-left:8px; padding:0 6px; border-radius:999px; background:var(--tint); color:var(--ink); font-size:.75rem; }
+.delta { font-weight:700; font-size:.85rem; color:var(--low); }
+
+.leaflet-container.picking { cursor:crosshair; }
+.ghost[aria-pressed="true"] { background:var(--accent); color:var(--accent-ink); border-color:var(--accent); font-weight:700; }
+.primary.busy::after { content:""; display:inline-block; width:14px; height:14px; margin-left:10px; vertical-align:-2px;
+  border:2px solid currentColor; border-right-color:transparent; border-radius:50%; animation:spin .7s linear infinite; }
+@keyframes spin { to { transform:rotate(360deg); } }

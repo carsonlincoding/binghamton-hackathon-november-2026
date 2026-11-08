@@ -16,7 +16,11 @@ app = Flask(__name__,
             template_folder=os.path.join(HERE, "templates"),
             static_folder=os.path.join(HERE, "static"))
 
-PREPARED = {}  # remembers fully prepared areas, so changing the storm re-scores instantly
+PREPARED = {}  # finished areas, kept in memory
+JOBS = {}      # areas being downloaded right now, so two requests for one area share a single download
+LOCK = threading.Lock()
+FETCH = ThreadPoolExecutor(max_workers=4)  # network downloads
+BUILD = ThreadPoolExecutor(max_workers=2)  # one build job per area
 
 def snap(box):
     """Round the box OUTWARD to a 0.01 grid. Nearby selections then share the same cached data."""
@@ -25,29 +29,42 @@ def snap(box):
     hi = lambda v: math.ceil(round(v * 100, 6)) / 100
     return lo(s), lo(w), hi(n), hi(e)
 
+def _build(sb, small):
+    infra_job = FETCH.submit(get_infrastructure, *sb)  # both downloads run at the same time
+    struct_job = FETCH.submit(get_structures, *sb) if small else None
+    infra = infra_job.result()
+    structs = struct_job.result() if struct_job else []
+    assets, area = enrich_assets(infra, structs)
+    if not small:
+        area["note"] = "Large area: building details are estimated. Zoom in for government building data."
+    return assets, area, bool(structs) or not small  # last value False = government lookup failed, do not remember it
+
 def prepare(box):
-    """Return (assets inside the box, area info, was_cached). Both data sources are fetched AT THE SAME TIME."""
+    """Return (assets inside the box, area info, was_cached)."""
     sb = snap(box)
     small = (sb[2] - sb[0]) <= 0.11 and (sb[3] - sb[1]) <= 0.11
     key = (sb, small)
-    hit = key in PREPARED
-    if not hit:
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            infra_job = pool.submit(get_infrastructure, *sb)
-            struct_job = pool.submit(get_structures, *sb) if small else None
-            infra = infra_job.result()
-            structs = struct_job.result() if struct_job else []
-        assets, area = enrich_assets(infra, structs)
-        if not small:
-            area["note"] = "Large area: building details are estimated. Zoom in for government building data."
-        if structs or not small:  # do not remember a failed government lookup
-            if len(PREPARED) >= 8:
-                PREPARED.pop(next(iter(PREPARED)))
-            PREPARED[key] = (assets, area)
-    else:
-        assets, area = PREPARED[key]
+    with LOCK:
+        done = PREPARED.get(key)
+        if done is None and key not in JOBS:
+            JOBS[key] = BUILD.submit(_build, sb, small)
+        job = JOBS.get(key)
+    hit = done is not None
+    if done is None:
+        try:
+            assets, area, ok = job.result()  # if someone already started this download, we simply wait for it
+        finally:
+            with LOCK:
+                JOBS.pop(key, None)
+        if ok:
+            with LOCK:
+                if len(PREPARED) >= 8:
+                    PREPARED.pop(next(iter(PREPARED)))
+                PREPARED[key] = (assets, area)
+        done = (assets, area)
+    assets, area = done
     s, w, n, e = box
-    return [a for a in assets if s <= a["lat"] <= n and w <= a["lon"] <= e], area, hit
+    return [x for x in assets if s <= x["lat"] <= n and w <= x["lon"] <= e], area, hit
 
 def bbox_from(body):
     """Pull the locked area out of the request and reject areas that are too big."""
@@ -69,6 +86,18 @@ def live_wind():
         return jsonify({"error": "Area too large. Zoom in a bit and try again."}), 400
     s, w, n, e = box
     return jsonify(get_forecast((s + n) / 2, (w + e) / 2))
+
+@app.route("/api/warm", methods=["POST"])
+def warm():
+    # Called the moment an area is locked, so the data is already downloaded when the user presses Run.
+    box = bbox_from(request.get_json())
+    if not box:
+        return jsonify({"error": "Area too large. Zoom in a bit and try again."}), 400
+    try:
+        assets, area, hit = prepare(box)
+    except Exception:
+        return jsonify({"error": "Map data service is busy. You can still press Run to retry."}), 503
+    return jsonify({"count": len(assets), "note": area.get("note")})
 
 @app.route("/api/analyze", methods=["POST"])
 def analyze():
