@@ -1,9 +1,3 @@
-# data_fetch.py - gets REAL data from free public sources. Used by app.py.
-# Upgrades over version 1:
-#   1. CACHING: repeat requests (like moving the wind slider) reuse saved answers instead of re-downloading.
-#   2. PARALLEL: the alerts request runs at the same time as the forecast request.
-#   3. RETRIES: the free weather service sometimes errors; we quietly try again.
-#   4. WORST CASE: wind is the PEAK of the next 24 hours, not just the next hour.
 import math
 import re
 import time
@@ -12,16 +6,14 @@ from concurrent.futures import ThreadPoolExecutor
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-# One shared "session" reuses the same connection, which is faster than a new one every time.
 session = requests.Session()
-session.headers.update({"User-Agent": "StormReadinessMap-Hackathon (student project)"})  # NWS requires this
+session.headers.update({"User-Agent": "StormReadinessMap-Hackathon (student project)"})  
 retry = Retry(total=2, backoff_factor=0.5, status_forcelist=[429, 500, 502, 503, 504])
 session.mount("https://", HTTPAdapter(max_retries=retry))
 
-TIMEOUT = (5, 15)  # seconds to connect, seconds to wait for data
+TIMEOUT = (5, 15)  
 
-# ---------- Tiny cache: remembers answers for a while ----------
-_cache = {}  # key -> (time saved, value)
+_cache = {}  
 
 def cached(key, ttl_seconds, fetch_function):
     """If we saved this answer recently, return it. Otherwise fetch, save, and return it."""
@@ -33,20 +25,17 @@ def cached(key, ttl_seconds, fetch_function):
     return value
 
 # ---------- Infrastructure (OpenStreetMap) ----------
-# Two public servers: if the first is busy, we try the second.
 OVERPASS_URLS = ["https://overpass-api.de/api/interpreter",
                  "https://overpass.kumi.systems/api/interpreter"]
 
 def get_infrastructure(s, w, n, e):
-    # Round the box so tiny differences still hit the cache. Infrastructure rarely changes: keep 1 hour.
     key = ("infra", round(s, 3), round(w, 3), round(n, 3), round(e, 3))
     return cached(key, 3600, lambda: _fetch_infrastructure(s, w, n, e))
 
 def _fetch_infrastructure(s, w, n, e):
-    big = max(n - s, e - w) > 0.3  # very large area: keep only major bridges so the answer stays manageable
+    big = max(n - s, e - w) > 0.3  
     box = f"({s},{w},{n},{e})"
     bridges = '["highway"~"motorway|trunk|primary"]' if big else '["highway"]'
-    # One limit PER TYPE, so thousands of small bridges can never push out the hospitals and substations.
     query = f"""[out:json][timeout:{90 if big else 50}];
     nwr["amenity"="hospital"]{box}->.a; .a out center tags 400;
     nwr["amenity"~"fire_station|police"]{box}->.b; .b out center tags 400;
@@ -62,12 +51,12 @@ def _fetch_infrastructure(s, w, n, e):
         except requests.RequestException as err:
             last_error = err
     else:
-        raise last_error  # both servers failed
+        raise last_error 
 
     assets = []
     for el in r.json().get("elements", []):
         tags = el.get("tags", {})
-        center = el.get("center", el)  # ways have "center", nodes have lat/lon directly
+        center = el.get("center", el)  
         if "lat" not in center:
             continue
         if tags.get("power") == "substation":
@@ -81,7 +70,6 @@ def _fetch_infrastructure(s, w, n, e):
         assets.append({
             "name": tags.get("name", f"Unnamed {kind}"), "type": kind,
             "lat": center["lat"], "lon": center["lon"],
-            # Floors/material are often missing in OSM. None = we will ESTIMATE later.
             "levels": tags.get("building:levels"), "material": tags.get("building:material"),
         })
     return assets
@@ -89,11 +77,10 @@ def _fetch_infrastructure(s, w, n, e):
 # ---------- Weather (National Weather Service) ----------
 def get_forecast(lat, lon):
     """Returns the worst wind in the next 24 hours plus active alerts. Never crashes the app."""
-    key = ("wx", round(lat, 2), round(lon, 2))  # ~1 km resolution is plenty for weather
+    key = ("wx", round(lat, 2), round(lon, 2))  
     try:
-        return cached(key, 600, lambda: _fetch_forecast(lat, lon))  # keep 10 minutes
+        return cached(key, 600, lambda: _fetch_forecast(lat, lon))  
     except Exception:
-        # Weather service down: return a clearly-labeled default. Not cached, so we retry next time.
         return {"wind_mph": 25, "wind_now": 25, "peak_time": None, "hourly_winds": [],
                 "summary": "Forecast unavailable, using a default of 25 mph", "alerts": [], "live": False}
 
@@ -105,7 +92,7 @@ def _fetch_alerts(lat, lon):
     r = session.get(f"https://api.weather.gov/alerts/active?point={lat:.4f},{lon:.4f}", timeout=TIMEOUT)
     r.raise_for_status()
     events = [a["properties"]["event"] for a in r.json().get("features", [])]
-    return sorted(set(events))  # remove duplicates
+    return sorted(set(events))  
 
 def _fetch_hourly_url(lat, lon):
     r = session.get(f"https://api.weather.gov/points/{lat:.4f},{lon:.4f}", timeout=TIMEOUT)
@@ -114,8 +101,7 @@ def _fetch_hourly_url(lat, lon):
 
 def _fetch_forecast(lat, lon):
     with ThreadPoolExecutor(max_workers=2) as pool:
-        alerts_job = pool.submit(_fetch_alerts, lat, lon)  # runs in the background...
-        # ...while we look up the forecast. The grid URL for a place never changes, so cache it a day.
+        alerts_job = pool.submit(_fetch_alerts, lat, lon)  
         url = cached(("grid", round(lat, 2), round(lon, 2)), 86400, lambda: _fetch_hourly_url(lat, lon))
         hourly = session.get(url, timeout=TIMEOUT)
         hourly.raise_for_status()
@@ -125,10 +111,10 @@ def _fetch_forecast(lat, lon):
     winds = [_wind_number(p["windSpeed"]) for p in periods]
     peak_index = winds.index(max(winds))
     return {
-        "wind_mph": winds[peak_index],           # the number the risk model uses (worst case)
+        "wind_mph": winds[peak_index],           
         "wind_now": winds[0],
         "peak_time": periods[peak_index]["startTime"],
-        "hourly_winds": winds,                   # handy later for a wind chart
+        "hourly_winds": winds,                   
         "summary": periods[peak_index]["shortForecast"],
         "alerts": alerts,
         "live": True,
@@ -137,14 +123,14 @@ def _fetch_forecast(lat, lon):
 # ---------- Government building data: USACE National Structure Inventory (NSI) ----------
 NSI_URL = "https://nsi.sec.usace.army.mil/nsiapi/structures?fmt=fc"
 BUILDINGS = ("hospital", "fire_station", "police", "water_works")
-CELL = 0.004  # about 400 m; we search nearby structures using a simple grid of cells this size
+CELL = 0.004 
 
 def get_structures(s, w, n, e):
     key = ("nsi", round(s, 3), round(w, 3), round(n, 3), round(e, 3))
     try:
         return cached(key, 3600, lambda: _fetch_structures(s, w, n, e))
     except Exception:
-        return []  # if the government service is down, the app keeps working with estimates
+        return []  
 
 def _fetch_structures(s, w, n, e):
     poly = {"type": "Polygon", "coordinates": [[[w, s], [e, s], [e, n], [w, n], [w, s]]]}
@@ -173,7 +159,7 @@ def enrich_assets(assets, structures):
             "base_elev": None, "source": "USACE National Structure Inventory" if structures else None}
     elevs = sorted(x["elev"] for x in structures if x["elev"] is not None)
     if elevs:
-        area["base_elev"] = elevs[int(len(elevs) * 0.05)]  # near the lowest ground in the area
+        area["base_elev"] = elevs[int(len(elevs) * 0.05)]  
     grid = {}
     for x in structures:
         grid.setdefault((int(x["lat"] // CELL), int(x["lon"] // CELL)), []).append(x)
@@ -185,12 +171,12 @@ def enrich_assets(assets, structures):
         near = min(cand, key=d, default=None)
         local = sorted(x["elev"] for di in range(-2, 3) for dj in range(-2, 3)
                        for x in grid.get((ci + di, cj + dj), []) if x["elev"] is not None)
-        a["base_elev"] = local[int(len(local) * 0.1)] if len(local) >= 5 else None  # low ground within ~1 km
+        a["base_elev"] = local[int(len(local) * 0.1)] if len(local) >= 5 else None  
         a["people_nearby"] = round(sum(x["people"] for x in cand if d(x) <= CELL))
         a["data_source"] = "OpenStreetMap"
         if near and d(near) <= CELL:
             a.update(ground_elv=near["elev"], firmzone=near["firmzone"], data_source="OSM + NSI terrain")
-            if a["type"] in BUILDINGS and d(near) <= 0.0006:  # within ~60 m: treat as the same building
+            if a["type"] in BUILDINGS and d(near) <= 0.0006:  
                 a.update(material=near["material"] or a["material"], levels=near["stories"] or a["levels"],
                          found_ht=near["found_ht"], data_source="OSM + NSI building")
     return assets, area
