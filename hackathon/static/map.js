@@ -1,4 +1,33 @@
-const map = L.map("map", { preferCanvas: true }).setView([42.0987, -75.918], 13);
+const map = L.map("map", {
+  zoomControl: true,
+
+  // Smoother zoom increments
+  zoomSnap: 0.25,
+  zoomDelta: 0.5,
+
+  // Less aggressive mouse-wheel zoom
+  scrollWheelZoom: true,
+  wheelDebounceTime: 40,
+  wheelPxPerZoomLevel: 120,
+
+  // Smooth map animations
+  zoomAnimation: true,
+  zoomAnimationThreshold: 4,
+  fadeAnimation: true,
+  markerZoomAnimation: true,
+
+  // Better movement when dragging
+  dragging: true,
+  inertia: true,
+  inertiaDeceleration: 3000,
+  easeLinearity: 0.2,
+
+  // Touchscreen support
+  touchZoom: true,
+  doubleClickZoom: true,
+  boxZoom: true,
+  keyboard: true
+}).setView([42.0987, -75.918], 11);
 L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",
   { attribution: "&copy; OpenStreetMap contributors" }).addTo(map);
 
@@ -6,6 +35,7 @@ let picking = false, corners = [], box = null, preview = null, lockId = 0, locke
 const memo = new Map();
 const mk = new Map();
 const hidden = new Set();
+let markersVisible = true;
 const $ = (id) => document.getElementById(id);
 const COLORS = { high: "#C8372D", mid: "#E08A1E", low: "#3C8D5A" };
 const levelOf = (r) => (r >= 60 ? "high" : r >= 30 ? "mid" : "low");
@@ -16,12 +46,28 @@ const hl = L.layerGroup().addTo(map);
 const legend = L.control({ position: "bottomright" });
 legend.onAdd = () => {
   const d = L.DomUtil.create("div", "legend");
-  d.innerHTML = '<b>Risk</b><br><i style="background:#C8372D"></i>High 60%+<br><i style="background:#E08A1E"></i>Medium 30-59%' +
-    '<br><i style="background:#3C8D5A"></i>Low<br><small>Bigger dot = higher priority</small>' +
-    '<hr><label>Overlay shows <select id="heatMode"><option value="risk">Damage risk</option><option value="recovery">Recovery time</option></select></label>' +
-    '<label><input type="checkbox" id="heatToggle" checked> Show overlay</label>' +
-    '<label>Strength <input type="range" id="heatOpacity" min="10" max="100" value="100"></label>' +
-    '<small id="heatNote">Colors show predicted damage across the area.</small>';
+  d.innerHTML =
+    '<b>Map layers</b>' +
+    '<hr>' +
+    '<label><input type="checkbox" id="markerToggle" checked> Infrastructure markers</label>' +
+    '<label><input type="checkbox" id="heatToggle" checked> Risk heatmap</label>' +
+    '<label>Overlay type ' +
+      '<select id="heatMode">' +
+        '<option value="risk">Modeled asset risk</option>' +
+        '<option value="recovery">Recovery time</option>' +
+      '</select>' +
+    '</label>' +
+    '<label>Heatmap strength ' +
+      '<input type="range" id="heatOpacity" min="10" max="100" value="100">' +
+    '</label>' +
+    '<hr>' +
+    '<b>Risk levels</b><br>' +
+    '<i style="background:#C8372D"></i> High 60%+<br>' +
+    '<i style="background:#E08A1E"></i> Medium 30-59%<br>' +
+    '<i style="background:#3C8D5A"></i> Low<br>' +
+    '<small>Bigger marker = higher priority</small>' +
+    '<small id="heatNote">Heatmap interpolates modeled risk between mapped assets. It is not a parcel-level forecast.</small>';
+
   return d;
 };
 legend.addTo(map);
@@ -255,7 +301,33 @@ function draw() {
     const lvl = levelOf(a.risk); count[lvl]++;
     const id = a.name + "|" + a.lat + "|" + a.lon; keep.add(id);
     const rad = 6 + Math.min(a.priority, 100) / 8;
-    let m = mk.get(id);
+    
+  let m = mk.get(id);
+
+  if (!m) {
+    m = L.circleMarker([a.lat, a.lon], {
+      radius: rad,
+      color: COLORS[lvl],
+      fillOpacity: 0.8
+    }).bindTooltip(tip(a));
+
+    mk.set(id, m);
+  } else {
+    m.setStyle({ color: COLORS[lvl] });
+    m.setRadius(rad);
+    m.setTooltipContent(tip(a));
+  }
+
+  if (markersVisible) {
+    if (!map.hasLayer(m)) m.addTo(map);
+  } else {
+    if (map.hasLayer(m)) m.remove();
+  }
+
+  m.off("click");
+  m.on("click", () => showDetail(a));
+  a.marker = m;
+
     if (m) { m.setStyle({ color: COLORS[lvl] }); m.setRadius(rad); m.setTooltipContent(tip(a)); if (!map.hasLayer(m)) m.addTo(map); m.off("click"); }
     else { m = L.circleMarker([a.lat, a.lon], { radius: rad, color: COLORS[lvl], fillOpacity: 0.8 }).addTo(map).bindTooltip(tip(a)); mk.set(id, m); }
     m.on("click", () => showDetail(a)); a.marker = m;
@@ -277,21 +349,51 @@ function draw() {
 
 }
 
+
 function plain(a) {
-  const word = { high: "Very likely to fail", mid: "Could fail", low: "Probably holds up" }[levelOf(a.risk)];
-  const top = Object.entries(a.breakdown).sort((x, y) => y[1] - x[1])[0];
-  const why = top && top[1] > 0 ? ` Biggest danger: ${top[0].toLowerCase()}.` : "";
-  const time = a.recovery_hrs >= 48 ? `about ${Math.round(a.recovery_hrs / 24)} days` : `about ${a.recovery_hrs} hours`;
-  const fix = a.risk >= 30 && a.recovery_hrs > 0 ? ` If it fails, expect ${time} to restore.` : "";
-  const dep = a.depends_on ? ` It also depends on power from "${a.depends_on}".` : "";
-  return word + "." + why + fix + dep;
+  const word = {
+    high: "High modeled risk",
+    mid: "Moderate modeled risk",
+    low: "Lower modeled risk"
+  }[levelOf(a.risk)];
+
+  const factors = Object.entries(a.breakdown || {})
+    .filter(([, value]) => value > 0)
+    .sort((x, y) => y[1] - x[1]);
+
+  const top = factors[0];
+  const why = top
+    ? `The largest modeled risk factor is ${top[0].toLowerCase()} (${top[1]}%).`
+    : "No significant hazard contributions were identified.";
+
+  const time = a.recovery_hrs >= 48
+    ? `about ${Math.round(a.recovery_hrs / 24)} days`
+    : `about ${Math.round(a.recovery_hrs)} hours`;
+
+  const recovery = a.recovery_hrs > 0
+    ? ` Estimated recovery time is ${time}.`
+    : "";
+
+  const dependency = a.depends_on
+    ? ` This asset also has a modeled power dependency on ${a.depends_on}.`
+    : "";
+
+  return `${word}. ${why}${recovery}${dependency}`;
 }
+
 
 function showDetail(a) {
   const d = $("detail"); d.innerHTML = ""; d.className = "lvl-" + levelOf(a.risk);
   highlight(a);
   const x = document.createElement("button");
-  x.className = "close"; x.textContent = "\u00d7"; x.setAttribute("aria-label", "Close details"); x.onclick = () => { d.hidden = true; hl.clearLayers(); };
+  x.className = "close"; x.textContent = "\u00d7"; x.setAttribute("aria-label", "Close details"); 
+  x.onclick = () => {
+  d.hidden = true;
+  hl.clearLayers();
+
+  // Restore the map legend
+  legend.getContainer().style.display = "";
+  };
   d.appendChild(x);
   const add = (tag, text, cls) => { const e = document.createElement(tag); e.textContent = text; if (cls) e.className = cls; d.appendChild(e); return e; };
   add("h3", a.name);
@@ -300,8 +402,9 @@ function showDetail(a) {
   const verdict = document.createElement("span");
   verdict.className = "verdict"; verdict.textContent = text.slice(0, cut);
   lead.append(verdict, text.slice(cut));
-  add("div", `${a.risk}% chance of failure (likely ${a.risk_low}-${a.risk_high}%)`, "big");
-  add("h4", "What could break it");
+  add("div", `${a.risk}% modeled risk score`, "big");
+  add("p", `Estimated score range: ${a.risk_low}-${a.risk_high}%. This is a model-based estimate, not a measured probability of failure.`, "note");
+  add("h4", "Main modeled risk factors");
   Object.entries(a.breakdown).filter(([, v]) => v > 0).sort((p, q) => q[1] - p[1]).forEach(([k, v]) => {
     add("div", `${k}: ${v}%`, "bar").style.setProperty("--w", v + "%");
   });
@@ -315,6 +418,8 @@ function showDetail(a) {
   document.querySelectorAll("#results li.sel").forEach((x) => x.classList.remove("sel"));
   if (a.li) { a.li.classList.add("sel"); a.li.scrollIntoView({ block: "nearest" }); }
   d.hidden = false;
+
+  legend.getContainer().style.display = "none";
 }
 
 function stormBar() {
@@ -412,11 +517,17 @@ function fixes(a) {
     const row = FIX_TABLE[label];
     if (!row) return;
     const [title, cost, m] = row[a.type] || row.default;
-    items.push({ title, cost, why: `${label} alone gives a ${v}% failure chance here.` + fixContext(a, label), mult: { [label]: m }, casc: 1 });
+    items.push({
+      title,
+      cost,
+      why: `${label} is a significant modeled risk contributor (${v}%).` + fixContext(a, label),
+      mult: { [label]: m },
+      casc: 1
+    });
   });
   if (a.depends_on && a.cascade >= 5) {
     items.push({ title: a.type === "hospital" ? "Test the backup generator and stock 72+ hours of fuel" : "Add a backup generator or a second power feed",
-      cost: "$$", why: `Losing power at "${a.depends_on}" adds ${a.cascade} points of risk.`, mult: {}, casc: 0.25 });
+      cost: "$$", why: `Losing power at "${a.depends_on}" adds ${a.cascade} points to the modeled risk score.`, mult: {}, casc: 0.25 });
   }
   items.forEach((f) => { f.after = Math.round(Math.max(0, a.risk - Math.max(0, base - riskWith(a, f.mult, f.casc)))); });
   items.sort((p, q) => p.after - q.after);
@@ -530,10 +641,16 @@ const heat = {
 };
 map.on("moveend zoomend resize", () => heat.schedule());
 L.DomEvent.disableClickPropagation(legend.getContainer());
+$("markerToggle").onchange = (e) => {
+  markersVisible = e.target.checked;
+  draw();
+};
 $("heatToggle").onchange = (e) => { heat.on = e.target.checked; heat.schedule(); };
 $("heatOpacity").oninput = (e) => { heat.opacity = e.target.value / 100; heat.schedule(); };
 $("heatMode").onchange = (e) => {
   heat.mode = e.target.value;
-  $("heatNote").textContent = heat.mode === "risk" ? "Colors show predicted damage across the area." : "Colors show how long recovery could take (green fast, red slow).";
+  $("heatNote").textContent = heat.mode === "risk"
+  ? "Interpolated modeled risk between mapped assets; not a parcel-level forecast."
+  : "Interpolated recovery-time estimates between mapped assets.";
   heat.schedule();
 };
