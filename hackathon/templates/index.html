@@ -9,34 +9,72 @@
 </head>
 <body>
   <aside id="panel">
-    <h1>Storm Readiness Map</h1>
-    <button id="selectBtn">1. Pick area (click 2 corners)</button>
-    <button id="lockBtn" disabled>2. Lock area</button>
+    <header>
+      <h1>Storm Readiness Map</h1>
+      <p class="sub">Pick a place, pick a storm, see what to protect first.</p>
+    </header>
+    <nav class="tabs">
+      <button id="tabSetup" class="tab on">Setup</button>
+      <button id="tabResults" class="tab" disabled>Results</button>
+    </nav>
 
-    <h2>3. Build your storm</h2>
-    <div class="presets">
-      <button class="secondary" data-preset="thunderstorm">Thunderstorm</button>
-      <button class="secondary" data-preset="flash">Flash flood</button>
-      <button class="secondary" data-preset="nor">Nor'easter</button>
-      <button class="secondary" data-preset="ice">Ice storm</button>
-      <button class="secondary" data-preset="hurricane">Hurricane</button>
-      <button class="secondary" data-preset="clear">Reset</button>
+    <div id="setupView">
+      <section class="card">
+        <h2><span class="step">1</span>Choose an area</h2>
+        <div class="row">
+          <input id="searchBox" type="text" placeholder="Search a town or address" aria-label="Search a place">
+          <button id="searchBtn" class="ghost">Go</button>
+        </div>
+        <div class="row">
+          <button id="viewBtn" class="ghost">Use map view</button>
+          <button id="selectBtn" class="ghost">Draw box</button>
+          <button id="lockBtn" class="ghost" disabled>Lock</button>
+        </div>
+        <p class="hint">Fastest: search a town, then tap "Use map view".</p>
+      </section>
+
+      <section class="card">
+        <h2><span class="step">2</span>Choose a storm</h2>
+        <div id="presets" class="presets"></div>
+        <div id="types" class="presets"></div>
+        <p id="stormInfo" class="hint"></p>
+        <button id="liveBtn" class="ghost wide" disabled>Use live wind forecast</button>
+        <div id="spark"></div>
+        <h3 class="sub2">Fine-tune</h3>
+        {% for key, h in hazards.items() if h.group == "main" %}
+        <label class="sl"><span class="lab">{{ h.label }}</span><span class="v"><b id="val-{{ key }}">0</b> {{ h.unit }}</span>
+          <input type="range" class="hz" data-key="{{ key }}" data-label="{{ h.label }}" data-unit="{{ h.unit }}" min="0" max="{{ h.max }}" step="{{ h.step }}" value="0"><small>{{ h.hint }}</small></label>
+        {% endfor %}
+        <details>
+          <summary>More factors (ice, snow, lightning, heat, earthquake)</summary>
+          {% for key, h in hazards.items() if h.group == "more" %}
+          <label class="sl"><span class="lab">{{ h.label }}</span><span class="v"><b id="val-{{ key }}">0</b> {{ h.unit }}</span>
+            <input type="range" class="hz" data-key="{{ key }}" data-label="{{ h.label }}" data-unit="{{ h.unit }}" min="0" max="{{ h.max }}" step="{{ h.step }}" value="0"><small>{{ h.hint }}</small></label>
+          {% endfor %}
+        </details>
+      </section>
+      <p class="note">Estimates only. Vulnerability numbers are demo assumptions. This is a planning aid, not a prediction.</p>
     </div>
-    <button id="liveBtn" class="secondary" disabled>Load live wind forecast</button>
 
-    {% for key, h in hazards.items() %}
-    <label>{{ h.label }}: <b id="val-{{ key }}">0</b> {{ h.unit }}
-      <input type="range" class="hz" data-key="{{ key }}" min="0" max="{{ h.max }}" step="{{ h.step }}" value="0">
-    </label>
-    {% endfor %}
+    <div id="resultsView" hidden>
+      <div id="summary"></div>
+      <div id="filters"></div>
+      <p class="hint">Ranked: most important to protect first. Tap one for details.</p>
+      <ol id="results"></ol>
+    </div>
 
-    <button id="runBtn" disabled>4. Run the storm</button>
-    <p id="status"></p>
-    <p id="summary"></p>
-    <ol id="results"></ol>
-    <p class="note">Values marked "est." are estimates, not measured data. Vulnerability numbers are demo assumptions.</p>
+    <div id="dock">
+      <div id="stormBar"><span class="sb-label">Storm</span> <b id="sbName">No storm set</b> <span id="sbEdit" class="edited" hidden>[edited]</span><div id="sbFacts"></div></div>
+      <button id="runBtn" class="primary" disabled>Run the storm</button>
+      <p id="status" role="status" aria-live="polite"></p>
+    </div>
   </aside>
-  <div id="map"></div>
+
+  <div id="mapwrap">
+    <div id="map"></div>
+    <div id="stormTag" hidden></div>
+    <div id="detail" hidden></div>
+  </div>
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="{{ url_for('static', filename='map.js') }}"></script>
 </body>
